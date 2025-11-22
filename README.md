@@ -1,7 +1,5 @@
 # Cloud Native Web Application – End-to-End Deployment on AWS
 
-**CSYE 6225 – Cloud Native Web App | Northeastern University**
-
 **Technologies:** Django · DRF · MySQL · AWS · Terraform · Packer · EC2 · ALB · ASG · Route 53 · ACM · Lambda · DynamoDB · SNS · SendGrid
 
 This project implements a fully automated, production-grade cloud-native application deployed on AWS using Infrastructure as Code, scalable architecture, secure networking and a serverless email verification workflow.
