@@ -1,0 +1,51 @@
+name: Terraform CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  terraform-validation:
+    name: Terraform Format and Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.5"  # Match your requirement >= 1.5.0
+
+      - name: Check Terraform formatting
+        run: |
+          set -o pipefail
+          terraform fmt -check -recursive 2>&1 | tee -a terraform-ci.log
+
+      - name: Initialize Terraform
+        run: |
+          set -o pipefail
+          terraform init -backend=false 2>&1 | tee -a terraform-ci.log
+
+      - name: Create placeholder Lambda ZIP
+        run: |
+          echo "Creating placeholder lambda_function_placeholder.zip ..."
+          mkdir -p $(dirname lambda_function_placeholder.zip)
+          echo "placeholder" > lambda_function_placeholder.py
+          zip -q lambda_function_placeholder.zip lambda_function_placeholder.py
+          echo "✅ Placeholder ZIP created successfully"
+
+      - name: Validate Terraform configuration
+        run: |
+          set -o pipefail
+          terraform validate 2>&1 | tee -a terraform-ci.log
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-ci-logs
+          path: terraform-ci.log
+          retention-days: 7

@@ -1,0 +1,115 @@
+name: Deploy Lambda
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      FUNCTION_NAME: csye6225-email-verification-lambda
+
+    steps:
+      # ----------------------------------------
+      # Step 1. Checkout repository
+      # ----------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ----------------------------------------
+      # Step 2. Set up Python 3.12
+      # ----------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ----------------------------------------
+      # Step 3. Build Lambda package
+      # ----------------------------------------
+      - name: Build Lambda ZIP
+        run: |
+          echo "Packaging Lambda..."
+          mkdir -p package
+          pip install --target ./package sendgrid
+          cp lambda_function.py package/
+          cd package && zip -r ../lambda_function.zip . > /dev/null
+          cd ..
+          echo "Lambda package created: lambda_function.zip"
+
+      # ----------------------------------------
+      # Step 4. Configure AWS credentials (Dev)
+      # ----------------------------------------
+      - name: Configure AWS credentials
+        if: github.event.pull_request.merged == true
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # ----------------------------------------
+      # Step 6. Verify Lambda function exists
+      # ----------------------------------------
+      - name: Verify Lambda function exists
+        if: github.event.pull_request.merged == true
+        run: |
+          echo "Checking if Lambda exists: $FUNCTION_NAME"
+          if aws lambda get-function --function-name "$FUNCTION_NAME" > /dev/null 2>&1; then
+            echo " Lambda function exists."
+          else
+            echo " Lambda function $FUNCTION_NAME not found in $AWS_REGION"
+            exit 1
+          fi
+
+      # ----------------------------------------
+      # Step 7. Update Lambda function code
+      # ----------------------------------------
+      - name: Update Lambda function code
+        if: github.event.pull_request.merged == true
+        run: |
+          echo "Deploying updated Lambda code to $FUNCTION_NAME..."
+          aws lambda update-function-code \
+            --function-name "$FUNCTION_NAME" \
+            --zip-file fileb://lambda_function.zip \
+            --publish
+          echo " Lambda function code updated."
+
+      # ----------------------------------------
+      # Step 8. Wait for deployment
+      # ----------------------------------------
+      - name: Wait for Lambda update
+        if: github.event.pull_request.merged == true
+        run: |
+          echo "Waiting for Lambda update to complete..."
+          aws lambda wait function-updated --function-name "$FUNCTION_NAME"
+          echo " Lambda update completed successfully."
+
+      # ----------------------------------------
+      # Step 9. Verify Deployment Summary
+      # ----------------------------------------
+      - name: Verify deployment
+        if: github.event.pull_request.merged == true
+        run: |
+          echo "Fetching deployment info..."
+          FUNCTION_INFO=$(aws lambda get-function --function-name "$FUNCTION_NAME")
+          VERSION=$(echo $FUNCTION_INFO | jq -r '.Configuration.Version')
+          LAST_MODIFIED=$(echo $FUNCTION_INFO | jq -r '.Configuration.LastModified')
+          CODE_SIZE=$(echo $FUNCTION_INFO | jq -r '.Configuration.CodeSize')
+
+          echo "---------------------------"
+          echo "Deployment Summary"
+          echo "Function: $FUNCTION_NAME"
+          echo "Region: $AWS_REGION"
+          echo "Version: $VERSION"
+          echo "Last Modified: $LAST_MODIFIED"
+          echo "Code Size: $CODE_SIZE bytes"
+          echo "---------------------------"

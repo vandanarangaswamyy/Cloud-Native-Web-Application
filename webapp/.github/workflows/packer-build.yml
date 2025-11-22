@@ -1,0 +1,245 @@
+name: Build and Deploy AMI
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    if: github.event.pull_request.merged == true
+    name: BUILD AND DEPLOY AMI
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      DEMO_ACCOUNT_ID: ${{ secrets.DEMO_ACCOUNT_ID }}
+
+    steps:
+      # -------------------------------------------
+      # 1. Checkout repository
+      # -------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # -------------------------------------------
+      # 2. Configure AWS CLI for DEV account
+      # -------------------------------------------
+      - name: Configure AWS credentials (DEV)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # -------------------------------------------
+      # 3. Generate .env file
+      # -------------------------------------------
+      - name: Generate .env file from secrets
+        run: |
+          cat > .env <<EOF
+          MYSQL_DATABASE=${{ secrets.DB_NAME }}
+          MYSQL_USER=${{ secrets.DB_USER }}
+          MYSQL_PASSWORD=${{ secrets.DB_PASSWORD }}
+          MYSQL_ROOT_PASSWORD=${{ secrets.DB_ROOT_PASSWORD }}
+          MYSQL_HOST=127.0.0.1
+          MYSQL_PORT=3306
+          EOF
+
+      # (Optional) Verify .env file creation
+      - name: Verify .env file
+        run: |
+          echo "Contents of .env (sanitized):"
+          cat .env | sed 's/=.*/=[REDACTED]/'
+
+      # -------------------------------------------
+      # 4. Build application artifact
+      # -------------------------------------------
+      - name: Build Application Artifact
+        run: |
+          zip -r app.zip . \
+            -x "*.git*" "*.idea*" "venv/*" "__pycache__/*" ".pytest_cache/*" "*.coverage" ".DS_Store"
+
+      # -------------------------------------------
+      # 5. Set up and validate Packer
+      # -------------------------------------------
+      - name: Set up Packer
+        uses: hashicorp/setup-packer@v2
+
+      - name: Initialize and Validate Packer Template
+        run: |
+          cd packer
+          packer init ubuntu-webapp.pkr.hcl
+          packer validate -syntax-only \
+            -var "demo_account_id=${{ secrets.DEMO_ACCOUNT_ID }}" \
+            -var "aws_region=${{ secrets.AWS_REGION }}" \
+            ubuntu-webapp.pkr.hcl
+
+      # -------------------------------------------
+      # 6. Build AMI in DEV account
+      # -------------------------------------------
+      - name: Build Custom AMI in Dev Account
+        id: build
+        run: |
+          cd packer
+          packer build \
+            -var "aws_region=${{ secrets.AWS_REGION }}" \
+            -var "demo_account_id=${{ secrets.DEMO_ACCOUNT_ID }}" \
+            -var "artifact_path=../app.zip" \
+            ubuntu-webapp.pkr.hcl | tee build.log
+
+          AMI_ID=$(grep -Eo 'ami-[a-z0-9]+' build.log | tail -1)
+          if [ -z "$AMI_ID" ]; then
+            echo " AMI ID not found in logs!"
+            exit 1
+          fi
+          echo " Built AMI: $AMI_ID"
+          echo "AMI_ID=$AMI_ID" >> $GITHUB_ENV
+
+      # -------------------------------------------
+      # 7. Share AMI with Demo account
+      # -------------------------------------------
+      - name: Share AMI with Demo Account
+        run: |
+          echo " Sharing AMI $AMI_ID with Demo account..."
+          aws ec2 modify-image-attribute \
+            --image-id "$AMI_ID" \
+            --launch-permission "Add=[{UserId=${{ secrets.DEMO_ACCOUNT_ID }}}]" \
+            --region ${{ secrets.AWS_REGION }}
+          echo "Shared successfully."
+
+      # -------------------------------------------
+      # 8. Wait for AMI visibility in Demo
+      # -------------------------------------------
+      - name: Wait for AMI to appear in Demo
+        run: |
+          echo " Waiting for AMI $AMI_ID to appear in Demo..."
+          for i in {1..18}; do
+            FOUND=$(aws ec2 describe-images \
+              --image-ids "$AMI_ID" \
+              --region ${{ secrets.AWS_REGION }} \
+              --query 'Images[0].ImageId' --output text 2>/dev/null || true)
+            if [[ "$FOUND" == "$AMI_ID" ]]; then
+              echo "AMI visible in Demo."
+              break
+            fi
+            echo "Waiting... ($i/18)"
+            sleep 10
+          done
+
+      # -------------------------------------------
+      # 9. Switch AWS credentials to DEMO account
+      # -------------------------------------------
+      - name: Configure AWS credentials (DEMO)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_DEMO }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEMO }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # -------------------------------------------
+      #  10. Find latest Launch Template dynamically
+      # -------------------------------------------
+      - name: Find Launch Template
+        id: findlt
+        run: |
+          echo " Searching for latest Launch Template..."
+          LT_NAME=$(aws ec2 describe-launch-templates \
+            --region ${{ secrets.AWS_REGION }} \
+            --query "reverse(sort_by(LaunchTemplates, &CreateTime))[0].LaunchTemplateName" \
+            --output text)
+
+          if [ -z "$LT_NAME" ] || [ "$LT_NAME" == "None" ]; then
+            echo " No Launch Template found!"
+            exit 1
+          fi
+
+          echo " Found Launch Template: $LT_NAME"
+          echo "LT_NAME=$LT_NAME" >> $GITHUB_ENV
+
+      # -------------------------------------------
+      #  11. Create new Launch Template version safely
+      # -------------------------------------------
+      - name: Create new Launch Template version
+        run: |
+          echo " Creating new Launch Template version for $LT_NAME..."
+
+          # Get latest version number of that template
+          LATEST_VER=$(aws ec2 describe-launch-template-versions \
+            --launch-template-name "$LT_NAME" \
+            --region ${{ secrets.AWS_REGION }} \
+            --query 'LaunchTemplateVersions[-1].VersionNumber' \
+            --output text)
+
+          if [ -z "$LATEST_VER" ] || [ "$LATEST_VER" == "None" ]; then
+            echo " Failed to get latest version for $LT_NAME"
+            exit 1
+          fi
+
+          echo "ℹ Latest version = $LATEST_VER"
+
+          # Create a new version using the new AMI
+          aws ec2 create-launch-template-version \
+            --launch-template-name "$LT_NAME" \
+            --source-version "$LATEST_VER" \
+            --launch-template-data "{\"ImageId\":\"$AMI_ID\"}" \
+            --region ${{ secrets.AWS_REGION }}
+
+          echo " Launch Template updated successfully."
+
+      # -------------------------------------------
+      #  12. Find Auto Scaling Group dynamically
+      # -------------------------------------------
+      - name: Find Auto Scaling Group
+        id: findasg
+        run: |
+          echo " Searching for ASG..."
+          ASG_NAME=$(aws autoscaling describe-auto-scaling-groups \
+            --query "AutoScalingGroups[?starts_with(AutoScalingGroupName, 'csye6225_asg')].AutoScalingGroupName" \
+            --output text \
+            --region ${{ secrets.AWS_REGION }})
+          if [ -z "$ASG_NAME" ]; then
+            echo " No Auto Scaling Group found!"
+            exit 1
+          fi
+          echo "Found ASG: $ASG_NAME"
+          echo "ASG_NAME=$ASG_NAME" >> $GITHUB_ENV
+
+      # -------------------------------------------
+      # 13. Start and Wait for Instance Refresh
+      # -------------------------------------------
+      - name: Start Instance Refresh
+        id: refresh
+        run: |
+          echo " Starting instance refresh for $ASG_NAME..."
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "$ASG_NAME" \
+            --preferences '{"MinHealthyPercentage": 90}' \
+            --query 'InstanceRefreshId' \
+            --output text \
+            --region ${{ secrets.AWS_REGION }})
+          echo "REFRESH_ID=$REFRESH_ID" >> $GITHUB_ENV
+          echo " Refresh started: $REFRESH_ID"
+
+      - name: Wait for Instance Refresh Completion
+        run: |
+          echo " Waiting for instance refresh to complete..."
+          while true; do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --instance-refresh-ids "$REFRESH_ID" \
+              --region ${{ secrets.AWS_REGION }} \
+              --query 'InstanceRefreshes[0].Status' \
+              --output text)
+            echo "Status: $STATUS"
+            if [[ "$STATUS" == "Successful" ]]; then
+              echo " Instance refresh completed!"
+              break
+            elif [[ "$STATUS" == "Failed" || "$STATUS" == "Cancelled" ]]; then
+              echo " Refresh failed or cancelled."
+              exit 1
+            fi
+            sleep 30
+          done

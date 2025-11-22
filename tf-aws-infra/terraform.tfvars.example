@@ -1,0 +1,56 @@
+# ---------------------------------------------------------
+# AWS Account / Environment
+# ---------------------------------------------------------
+target_account = "dev"          # or "demo"
+region         = "us-east-2"
+aws_region     = "us-east-2"
+
+# ---------------------------------------------------------
+# VPC & Networking
+# ---------------------------------------------------------
+vpc_name       = "assignment-vpc-a"
+vpc_cidr       = "10.50.0.0/16"
+subnet_newbits = 8
+
+tags = {
+  Project = "csye6225"
+  Owner   = "YourName"
+}
+
+# ---------------------------------------------------------
+# EC2 / Launch Template
+# ---------------------------------------------------------
+ami_id        = "ami-xxxxxxxxxxxxxxxxx"      # Replace with AMI built via CI/CD
+key_pair_name = "your-keypair-name"          # Example: csye6225-dev-key
+
+# ---------------------------------------------------------
+# RDS Database
+# ---------------------------------------------------------
+db_name = "webapp_db"
+db_user = "webapp_user"
+
+# RDS password will be auto-generated into Secrets Manager
+
+# ---------------------------------------------------------
+# SNS (Root AWS Org)
+# ---------------------------------------------------------
+root_sns_topic_arn = "arn:aws:sns:us-east-2:<ROOT-ACCOUNT-ID>:user-verification-topic"
+
+# ---------------------------------------------------------
+# SNS (Environment-specific)
+# ---------------------------------------------------------
+sns_topic_arn = "arn:aws:sns:us-east-2:<ACCOUNT-ID>:user-verification-topic"
+
+# ---------------------------------------------------------
+# Lambda Email Verification Function
+# ---------------------------------------------------------
+lambda_name = "user-verification-lambda"
+sender_email = "no-reply@yourdomain.com"
+
+# URL user clicks in verification email
+verification_url = "https://dev.yourdomain.com"
+
+# ---------------------------------------------------------
+# SendGrid API Key (Do NOT commit real value)
+# ---------------------------------------------------------
+sendgrid_api_key = "<YOUR_SENDGRID_API_KEY>"
